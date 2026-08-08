@@ -108,7 +108,13 @@ def repro_cli_legacy() -> dict:
     _banner("Bug1: CLI `xskill search skill` (legacy)")
     import subprocess
 
-    cmd = [sys.executable, "-m", "xskill", "search", "skill", "heartbeat", "--top-k", "2"]
+    # Prefer console script (issue used `xskill ...`); fall back to -m.
+    import shutil as _shutil
+    xskill_bin = _shutil.which("xskill")
+    if xskill_bin:
+        cmd = [xskill_bin, "search", "skill", "heartbeat", "--top-k", "2"]
+    else:
+        cmd = [sys.executable, "-m", "xskill", "search", "skill", "heartbeat", "--top-k", "2"]
     print("running:", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     print("exit=", proc.returncode)
