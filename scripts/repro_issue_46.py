@@ -103,29 +103,59 @@ def repro_search_current(skill_dir: Path) -> dict:
     }
 
 
-def repro_cli_legacy() -> dict:
-    """Try the exact CLI shape from the issue: `xskill search skill ...`."""
-    _banner("Bug1: CLI `xskill search skill` (legacy)")
-    import subprocess
+def repro_cli_legacy(skill_dir: Path) -> dict:
+    """Reproduce Bug1's AttributeError on the 0.5.2 code path.
 
-    # Prefer console script (issue used `xskill ...`); fall back to -m.
-    import shutil as _shutil
-    xskill_bin = _shutil.which("xskill")
-    if xskill_bin:
-        cmd = [xskill_bin, "search", "skill", "heartbeat", "--top-k", "2"]
-    else:
-        cmd = [sys.executable, "-m", "xskill", "search", "skill", "heartbeat", "--top-k", "2"]
-    print("running:", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    print("exit=", proc.returncode)
-    print("stdout=\n", proc.stdout[-2000:])
-    print("stderr=\n", proc.stderr[-2000:])
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    Full CLI needs a real embedding endpoint (``XSkill.embed`` probes on
+    access before ``search_skills`` runs).  Here we hit the same
+    ``skill_tools`` → ``core.search_skills`` JSON-shape bug without a
+    network probe, matching the issue stack at ``core.py`` L106.
+    """
+    _banner("Bug1: core.search_skills empty-index AttributeError (legacy)")
+    import json
+    from xskill.agents import skill_tools
+    from xskill.core import XSkill
+    from xskill.skill.repo import SkillRepo
+
+    skill_tools.init_context(skill_dir, skill_dir, None, object(), {})
+    raw = skill_tools.search_skills("heartbeat", top_k=2)
+    print(f"skill_tools.search_skills raw={raw!r}")
+
+    # Exact loop from 0.5.2 core.search_skills
+    attr_err = None
+    try:
+        items = json.loads(raw or "[]")
+        for item in items:
+            item.get("skill_name")
+        print("loop over parsed JSON: no AttributeError (unexpected)")
+    except AttributeError as exc:
+        attr_err = f"{type(exc).__name__}: {exc}"
+        print(f"REPRODUCED AttributeError via parsed loop: {attr_err}")
+
+    # Also via XSkill.search_skills with embed/llm stubbed
+    xs = XSkill.__new__(XSkill)
+    xs.config = {}
+    xs.skill_repo = SkillRepo(skill_dir)
+    xs._llm = None
+    xs._embed = object()
+    core_err = None
+    try:
+        xs.search_skills("heartbeat", top_k=2)
+        print("XSkill.search_skills: no raise (unexpected)")
+    except AttributeError as exc:
+        core_err = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+        print(f"REPRODUCED via XSkill.search_skills: {core_err}")
+    except Exception as exc:  # noqa: BLE001
+        core_err = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+        print(f"XSkill.search_skills other error: {core_err}")
+
     return {
-        "exit": proc.returncode,
-        "attribute_error": "AttributeError" in combined,
-        "stdout_tail": proc.stdout[-1000:],
-        "stderr_tail": proc.stderr[-1000:],
+        "skill_tools_raw": raw,
+        "loop_attribute_error": attr_err,
+        "core_error": core_err,
+        "attribute_error": bool(attr_err or (core_err and "AttributeError" in core_err)),
     }
 
 
@@ -194,7 +224,7 @@ def main() -> int:
         )
         print(proc.stdout or proc.stderr)
     else:
-        report["cli_search"] = repro_cli_legacy()
+        report["cli_search"] = repro_cli_legacy(skill_dir)
         report["status"] = repro_status_legacy(skill_dir)
 
     _banner("SUMMARY JSON")
@@ -216,6 +246,8 @@ def main() -> int:
         cli = report.get("cli_search", {})
         st = report.get("status", {})
         print("legacy_cli_attribute_error=", cli.get("attribute_error"))
+        print("legacy_skill_tools_raw=", cli.get("skill_tools_raw"))
+        print("legacy_core_error=", cli.get("core_error"))
         print("legacy_status_is_500=", st.get("is_500"))
         print("legacy_status_mentions_not_git=", st.get("mentions_not_git"))
     return 0
