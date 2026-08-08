@@ -88,18 +88,32 @@ def repro_search_current(skill_dir: Path) -> dict:
 
     api_app._skill_dir = skill_dir
     api_app._config = {"llm": {}, "embedding": {}}
+    # Guard: missing index must not construct an embed client.
+    api_app.create_embed_client = lambda _cfg: (_ for _ in ()).throw(
+        AssertionError("create_embed_client must not run when index missing"),
+    )
     app = FastAPI()
     app.include_router(api_app.router)
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    resp = client.post(
         "/api/v1/skills/search", json={"query": "heartbeat", "top_k": 2},
     )
     print(f"POST /api/v1/skills/search status={resp.status_code} body={resp.text[:400]}")
+    resp_resolve = client.post(
+        "/api/v1/skills/resolve", json={"query": "heartbeat"},
+    )
+    print(
+        f"POST /api/v1/skills/resolve status={resp_resolve.status_code} "
+        f"body={resp_resolve.text[:400]}"
+    )
     return {
         "index_hits": index_hits,
         "core_hits": None if core_hits is None else list(core_hits),
         "core_error": core_err,
         "api_search_status": resp.status_code,
         "api_search_body": resp.text[:400],
+        "api_resolve_status": resp_resolve.status_code,
+        "api_resolve_body": resp_resolve.text[:400],
     }
 
 
@@ -230,26 +244,33 @@ def main() -> int:
     _banner("SUMMARY JSON")
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
 
-    # Non-zero only if harness itself crashed earlier; always 0 so Actions
-    # uploads the log as the signal. Explicitly print verdict lines.
     _banner("VERDICT")
     if args.mode == "current":
         st = report["status"]
         se = report["search"]
-        print(
-            "status_fixed=",
-            st.get("status_code") == 200 and st.get("body", {}).get("git_branch") is None,
+        status_ok = (
+            st.get("status_code") == 200
+            and st.get("body", {}).get("git_branch") is None
         )
-        print("attribute_error_gone=", se.get("core_error") is None)
+        attr_ok = se.get("core_error") is None
+        search_ok = se.get("api_search_status") == 200
+        resolve_ok = se.get("api_resolve_status") == 200
+        print("status_fixed=", status_ok)
+        print("attribute_error_gone=", attr_ok)
         print("api_search_status=", se.get("api_search_status"))
-    else:
-        cli = report.get("cli_search", {})
-        st = report.get("status", {})
-        print("legacy_cli_attribute_error=", cli.get("attribute_error"))
-        print("legacy_skill_tools_raw=", cli.get("skill_tools_raw"))
-        print("legacy_core_error=", cli.get("core_error"))
-        print("legacy_status_is_500=", st.get("is_500"))
-        print("legacy_status_mentions_not_git=", st.get("mentions_not_git"))
+        print("api_search_ok=", search_ok)
+        print("api_resolve_status=", se.get("api_resolve_status"))
+        print("api_resolve_ok=", resolve_ok)
+        return 0 if (status_ok and attr_ok and search_ok and resolve_ok) else 1
+
+    cli = report.get("cli_search", {})
+    st = report.get("status", {})
+    print("legacy_cli_attribute_error=", cli.get("attribute_error"))
+    print("legacy_skill_tools_raw=", cli.get("skill_tools_raw"))
+    print("legacy_core_error=", cli.get("core_error"))
+    print("legacy_status_is_500=", st.get("is_500"))
+    print("legacy_status_mentions_not_git=", st.get("mentions_not_git"))
+    # Legacy job documents the old bugs; always green so the run completes.
     return 0
 
 
